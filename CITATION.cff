@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the corresponding paper."
+authors:
+- family-names: "Hosseini"
+  given-names: "Mostafa"
+- family-names: "Bagheri"
+  given-names: "Foad"
+title: "GUARD: An ABC-GA Hybrid Approach Utilizing Machine Learning and Dimensionality Reduction for Hardware Trojan Detection"
+version: 1.0.0
+date-released: 2025-12-15
+url: "https://github.com/YOUR-USERNAME/GUARD"
+preferred-citation:
+  type: conference-paper
+  title: "GUARD: An ABC-GA Hybrid Approach Utilizing Machine Learning and Dimensionality Reduction for Hardware Trojan Detection"
+  year: 2025
+  collection-title: "2025 IEEE East-West Design & Test Symposium (EWDTS)"
+  conference:
+    name: "2025 IEEE East-West Design & Test Symposium (EWDTS)"
+    city: "Tbilisi"
+    country: "Georgia"
+    date-start: "2025-12-05"
+    date-end: "2025-12-08"
