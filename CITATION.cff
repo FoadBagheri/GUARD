@@ -11,6 +11,15 @@ date-released: 2025-12-15
 url: "https://github.com/YOUR-USERNAME/GUARD"
 preferred-citation:
   type: conference-paper
+  authors:
+  - family-names: "Hosseini"
+    given-names: "Mostafa"
+  - family-names: "Azarpeyvand"
+    given-names: "Ali"
+  - family-names: "Bagheri"
+    given-names: "Foad"
+  - family-names: "Ghasempouri"
+    given-names: "Tara"
   title: "GUARD: An ABC-GA Hybrid Approach Utilizing Machine Learning and Dimensionality Reduction for Hardware Trojan Detection"
   year: 2025
   collection-title: "2025 IEEE East-West Design & Test Symposium (EWDTS)"
