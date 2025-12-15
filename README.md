@@ -19,7 +19,7 @@ The repository is organized as follows:
 * **Helper Modules:**
     * `clustering_combinational.py`: Implements dimensionality reduction logic for combinational circuits.
     * `clustering_sequential.py`: Implements dimensionality reduction logic for sequential circuits.
-    * `Dalgebra.py`: Helper module for algebraic operations.
+    * `Dalgebra.py`: Helper module contains functions for boolean operations.
 * **Datasets:**
     * `combinational_datasets/`: Contains ISCAS-85 benchmark files.
     * `sequential_datasets/`: Contains ISCAS-89 benchmark files.
