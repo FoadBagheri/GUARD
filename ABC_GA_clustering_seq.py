@@ -5,52 +5,70 @@
 
 import numpy as np
 from random import randint
-from scoap import *
 import random
 from Dalgebra import *
 from datetime import datetime
-from clustering import parser, grapher, cluster_find_inputs
+from clustering_sequential import parser, grapher, cluster_find_inputs
 
 start = datetime.now()
 
 
 class Parser:
+    """
+    Main class for parsing sequential circuits (.bench files), simulating logic,
+    handling flip-flops, calculating switching activity, and running ABC-GA optimization.
+    """
+
     def __init__(self, seed):
+        # Initialize random seeds for reproducibility
         self.seed = seed
         random.seed(self.seed)
         np.random.seed(self.seed)
+
+        # Data structures for circuit representation
         self.varIndex = {}
         self.varMap = {}
         self.nodeLevel = {}
         self.sortedNode = []
         self.inputList = []
         self.outputList = []
+
+        # Simulation and optimization parameters
         self.size = 0
-        self.NoItr = 1000
+        self.NoItr = 1000  # Number of iterations for Monte Carlo simulation
         self.threshold1 = 0.1
-        self.threshold2 = 0.3
-        self.Coverage_ratio = 1
-        self.flipFlops = {}  # Store flip-flop states
-        self.timeSteps = 10  # Number of time steps for sequential simulation
+        self.threshold2 = 0.2
+        self.coverage_ratio = 0.8  # Target coverage percentage for rare gates
+        self.flipFlops = {}  # Storage for DFF state management
+        self.timeSteps = 10  # Number of cycles for sequential simulation
 
     def readFile(self, fileName):
+        """
+        Reads the benchmark file, cleans inputs, and triggers parsing.
+        """
         with open(fileName, "r") as f:
             lines = f.readlines()
+            # Remove comments and empty lines
             lines = [i for i in lines if i != '\n' and i[0] != '#']
             lines = [i.replace("\n", "").replace(" ", "") for i in lines]
             self.__loadCode(lines)
             return
 
     def __loadCode(self, lines):
+        """
+        Parses the netlist line by line to build the graph structure,
+        identifying inputs, outputs, gates, and flip-flops.
+        """
         counter = 1
         for code in lines:
             if code.strip() == '':
                 continue
-            # INPUT/OUTPUT
+            # Handle INPUT and OUTPUT declarations
             elif code.casefold().find("=") == -1:
                 var = code[code.index("(") + 1: code.index(")")]
                 type = "INPUT" if (code.casefold().find("input") != -1) else "OUTPUT"
                 if var in self.varMap:
+                    # Handle case where an OUTPUT is also an INPUT (creates a buffer)
                     if type == "OUTPUT" and self.varMap[var][2] == "INPUT":
                         newVar = var + 'o'
                         self.varMap[newVar] = [
@@ -64,6 +82,7 @@ class Parser:
                     if type == "OUTPUT" and var not in self.outputList:
                         self.outputList.append(var)
                 else:
+                    # Initialize new node
                     self.varMap[var] = [counter, var, type, "_", "___", [], [], [-1, -1], 0, [0, 0], "_"]
                     self.varIndex[var] = counter
                     if type == "INPUT":
@@ -74,20 +93,21 @@ class Parser:
                     counter += 1
                     self.size += 1
             else:
-                # Gate or Flip-Flop
+                # Handle GATE and FLIP-FLOP definitions
                 var = code[:code.index("=")]
                 gate = code[code.index("=") + 1: code.index("(")]
                 inputs = code[code.index("(") + 1: code.index(")")].split(",")
 
-                if gate == "DFF":  # NEW: Handle flip-flops
-                    self.flipFlops[var] = {"input": inputs[0], "state": "0"}  # Initial state is 0
+                if gate == "DFF":
+                    # Register flip-flop with initial state 0
+                    self.flipFlops[var] = {"input": inputs[0], "state": "0"}
                     self.varMap[var] = [
                         counter, var, "FLIPFLOP", "0", "DFF", inputs, [], [-1, -1], 0, [0, 0], "_"
                     ]
                     self.varIndex[var] = counter
                     counter += 1
                     self.size += 1
-                else:  # Regular gate
+                else:
                     if var in self.varMap:
                         self.varMap[var][4] = gate
                         self.varMap[var][5] = inputs
@@ -99,32 +119,39 @@ class Parser:
                         counter += 1
                         self.size += 1
 
+        # Post-parsing processing
         self.__cirLevelization()
         self.__sortByLevel()
-        self.__genScoap()
-        self.__inputRand()
-        self.switchingActivity()
-        self.HTS_1()
-        self.rare_net()
+        self.__inputRand()  # Initial random simulation
+        self.switchingActivity()  # Calculate initial SWA
+        self.rare_net()  # Identify rare nodes
         return
 
+    # --- Circuit Levelization Methods ---
+
     def __nodeIsLevelable(self, node):
-        if self.varMap[node][4] == "DFF":  # Handle flip-flops in levelization
+        # Checks if node can be assigned a level; DFF logic handled separately
+        if self.varMap[node][4] == "DFF":
             return self.varMap[node][5][0] in self.nodeLevel
         return all(inp in self.nodeLevel for inp in self.varMap[node][5])
 
     def __maxOfInp(self, inpLst):
+        # Finds the maximum level among input nodes
         return max(self.nodeLevel[inp] for inp in inpLst)
 
     def __nodeLv(self, node):
         return self.nodeLevel[node]
 
     def __sortByLevel(self):
+        # Sorts nodes topologically to ensure correct simulation order
         self.sortedNode = sorted(self.nodeLevel.keys(), key=self.__nodeLv)
         self.inputList = sorted(self.inputList, key=self.__nodeLv)
         return
 
     def __cirLevelization(self):
+        """
+        Assigns logical levels to each node for topological sorting.
+        """
         isUpdate = True
         allAssigned = False
         while isUpdate and not allAssigned:
@@ -144,83 +171,48 @@ class Parser:
                         allAssigned = True
         return
 
-    def __genScoap(self):
-        for var in self.sortedNode:
-            if self.varMap[var][2] == "INPUT":
-                continue
-            gate = self.varMap[var][4]
-            inputs = self.varMap[var][5]
-            if gate == "DFF":  # SCOAP for flip-flops
-                self.varMap[var][7] = scoapBUFF([self.varMap[inputs[0]][7]])
-            else:
-                self.varMap[var][7] = self.__operateSCOAP(var, gate, inputs)
-        return
-
-    def __operateSCOAP(self, nodeOut, gate, inputNodes):
-        inputs = []
-        for node in inputNodes:
-            canonical = nodeOut + "_" + node
-            inputName = canonical if canonical in self.varMap else node
-            inputs.append(self.varMap[inputName][7])
-        if gate == "NOT":
-            return scoapNOT(inputs)
-        elif gate == "AND":
-            return scoapAND(inputs)
-        elif gate == "OR":
-            return scoapOR(inputs)
-        elif gate == "NAND":
-            return scoapNAND(inputs)
-        elif gate == "NOR":
-            return scoapNOR(inputs)
-        elif gate == "XOR":
-            return scoapXOR(inputs)
-        elif gate == "XNOR":
-            return scoapXNOR(inputs)
-        elif gate == "BUFF":
-            return scoapBUFF(inputs)
-
     def printSystem(self):
-        print()
-        print("SystemSpecification: ")
-        print("|-----|------|-------|------|---------|------------|---------|---------|--------------|---------|")
-        label = "|{:>5}|{:>6}|{:>7}|{:>6}|{:^9}|{:^12}|{:^9}|{:^9}|{:^14}|{:<14}".format(
-            "node", "level", "type", "val", "gate", "(CC0, CC1)", "(CO)", "MC(0, 1)", "input", "SWA"
+        """
+        Displays the circuit specification table.
+        """
+        print("\nSystem Specification: ")
+        print("|------|-------|-------|-------|---------|--------------|--------------|")
+
+        label = "|{:^6}|{:^7}|{:^7}|{:^7}|{:^9}|{:^14}|{:^14}|".format(
+            "NODE", "LEVEL", "TYPE", "VALUE", "GATE", "INPUT", "SWA"
         )
         print(label)
-        print("|-----|------|-------|------|---------|------------|---------|---------|--------------|---------|")
+        print("|------|-------|-------|-------|---------|--------------|--------------|")
+
         for key in self.sortedNode:
             line = self.varMap[key]
             node = line[1]
             level = "inf" if node not in self.nodeLevel else self.nodeLevel[node]
             type = line[2]
-            val = line[3]
+            value = line[3]
             gate = line[4]
-            cntr = ("(" + ",".join([str(key) for key in line[7]]) + ")") if line[7] != [-1, -1] else "(u, u)"
-            CO_ = str(line[8])
             SWA = str(line[10])
-            MC = ("(" + ",".join([str(key) for key in line[9]]) + ")") if line[9] != [0, 0] else "[0, 0]"
             input = ','.join([str(key) for key in line[5]]) if line[5] else "_____"
-            printLine = "|{:{f}>5}|{:{f}>6}|{:{f}>7}|{:{f}>6}|{:{f}>9}|{:{f}^12}|{:{f}^9}|{:{f}^9}|{:{f}^14}|{:{f}^14}|".format(
-                node, level, type, val, gate, cntr, CO_, MC, input, SWA, f='_')
+
+            printLine = "|{:{f}^6}|{:{f}^7}|{:{f}^7}|{:{f}^7}|{:{f}^9}|{:{f}^14}|{:{f}^14}|".format(
+                node, level, type, value, gate, input, SWA, f='_')
             print(printLine)
         return
 
-    def printInOut(self):
-        print("# of input list", len(self.inputList))
-        print("# of output list", len(self.outputList))
-        print("# of flip-flops", len(self.flipFlops))  # Display flip-flop count
-        return
-
     def __clearValue(self):
+        # Reset node values and flip-flop states before new simulation
         for var in self.varMap:
             self.varMap[var][3] = "_"
-        for ff in self.flipFlops:  # Reset flip-flop states
+        for ff in self.flipFlops:
             self.flipFlops[ff]["state"] = "0"
         return
 
     def circuitSimulation(self, inputVector):
+        """
+        Runs sequential logic simulation over defined time steps.
+        """
         self.__clearValue()
-        for _ in range(self.timeSteps):  # Simulate over time steps
+        for _ in range(self.timeSteps):
             self.__initInput(inputVector)
             self.__updateFlipFlops()
             for var in self.sortedNode:
@@ -233,13 +225,17 @@ class Parser:
         return
 
     def __initInput(self, inputVector):
+        # Assign values to input nodes
         for i in range(len(self.inputList)):
             node = self.inputList[i]
             value = inputVector[i]
             self.varMap[node][3] = value
         return
 
-    def __updateFlipFlops(self):  # Update flip-flop states
+    def __updateFlipFlops(self):
+        """
+        Updates the state of all flip-flops based on their inputs.
+        """
         for ff, info in self.flipFlops.items():
             input_val = self.varMap[info["input"]][3]
             if input_val in ["0", "1"]:
@@ -248,6 +244,7 @@ class Parser:
         return
 
     def __operate(self, nodeOut, gate, inputNodes):
+        # Performs the logic operation for a specific gate
         inputs = []
         for node in inputNodes:
             canonical = nodeOut + "_" + node
@@ -269,23 +266,30 @@ class Parser:
             return XNOR(inputs)
         elif gate == "BUFF":
             return BUFF(inputs)
-        elif gate == "DFF":  # Handle DFF operation
+        elif gate == "DFF":
             return inputs[0]
 
     def __inputRand(self):
+        # Generate random inputs for initial testing
         for _ in range(self.NoItr):
             inputVector = [str(randint(0, 1)) for _ in self.inputList]
             self.circuitSimulation(inputVector)
         return
 
     def switchingActivity(self):
+        """
+        Monte Carlo simulation to estimate Switching Activity (SWA) for all nodes.
+        """
         SwResult = {}
         prevState = {}
         changeCount = {}
+        # Initialize counters
         for node in self.sortedNode:
             SwResult[node] = [0, 0]
             changeCount[node] = {"0_to_1": 0, "1_to_0": 0}
             prevState[node] = None
+
+        # Run random vector simulations
         for _ in range(self.NoItr):
             inputVector = [str(randint(0, 1)) for _ in self.inputList]
             self.circuitSimulation(inputVector)
@@ -303,17 +307,24 @@ class Parser:
         return
 
     def rare_net(self):
-        gate_out_lst = ["AND", "NAND", "OR", "NOR", "XOR", "XNOR", "BUFF", "NOT", "DFF"]  # NEW: Include DFF
+        """
+        Identifies nodes (including DFFs) with switching activity in the target range.
+        """
+        gate_out_lst = ["AND", "NAND", "OR", "NOR", "XOR", "XNOR", "BUFF", "NOT", "DFF"]
         rare_list = []
         for node in self.sortedNode:
             if self.varMap[node][4] in gate_out_lst:
+                # Calculate average activity
                 rare_node = (self.varMap[node][10][0] + self.varMap[node][10][1]) / self.NoItr
-                # if rare_node < self.threshold1:
                 if self.threshold1 < rare_node < self.threshold2:
                     rare_list.append([node, rare_node])
         return rare_list
 
     def ABC_GA(self, cluster0, cluster1, cluster2):
+        """
+        Hybrid Artificial Bee Colony (ABC) and Genetic Algorithm (GA) optimization
+        to generate test vectors that activate rare gates.
+        """
         num_bees = 100
         mutation_rate = 0.1
         crossover_rate = 0.8
@@ -325,6 +336,7 @@ class Parser:
         total_test_vectors_generated = 0
 
         def get_activated_rare_gates(position):
+            # Helper to check which rare gates are triggered by a vector
             self.circuitSimulation(position)
             activated = set()
             for rare_gate in rare_gates:
@@ -333,7 +345,7 @@ class Parser:
                     activated.add(gate_name)
             return activated
 
-        # Initialize bee positions (solutions)
+        # Initialize bee positions based on clustered inputs
         bee_positions = []
         combined_clusters = cluster0 + cluster1 + cluster2
         sorted_effective_inputs = sorted([(idx, 0) for idx in combined_clusters], key=lambda x: x[1], reverse=True)
@@ -351,11 +363,12 @@ class Parser:
         global_best_position = max(bee_positions, key=lambda x: x['fitness'])['position']
         global_best_fitness = max(bee_positions, key=lambda x: x['fitness'])['fitness']
 
-        while len(activated_rare_gates) < self.Coverage_ratio * total_rare_gates:
+        # Main optimization loop
+        while len(activated_rare_gates) < self.coverage_ratio * total_rare_gates:
             total_test_vectors_generated += 1
             print(f"\nTest vector generation attempt: {total_test_vectors_generated}")
 
-            # Employed Bees Phase
+            # Phase 1: Employed Bees (Local Search)
             for i, bee in enumerate(bee_positions):
                 neighbor_idx = randint(0, num_bees - 1)
                 while neighbor_idx == i:
@@ -371,7 +384,7 @@ class Parser:
                 else:
                     bee['trials'] += 1
 
-            # Onlooker Bees Phase
+            # Phase 2: Onlooker Bees (Genetic Operations)
             for _ in range(num_bees):
                 parent1 = max(bee_positions, key=lambda x: x['fitness'])['position']
                 parent2 = bee_positions[randint(0, num_bees - 1)]['position']
@@ -381,7 +394,10 @@ class Parser:
                     child2 = self.mutate(child2, mutation_rate, dict(sorted_effective_inputs).keys())
                     activated_by_child1 = get_activated_rare_gates(child1)
                     activated_by_child2 = get_activated_rare_gates(child2)
-                    print(f"Test vector {total_test_vectors_generated} (ABC-GA) activated rare gates: {activated_by_child1}")
+                    print(
+                        f"Test vector {total_test_vectors_generated} (ABC-GA) activated rare gates: {activated_by_child1}")
+
+                    # Store vectors that activate new rare gates
                     new_rare_gates_child1 = activated_by_child1 - activated_rare_gates
                     if new_rare_gates_child1:
                         print(f"New rare gates activated by child1: {new_rare_gates_child1}")
@@ -394,7 +410,7 @@ class Parser:
                         test_vectors.append(child2)
                     print(f"Total rare gates activated so far: {len(activated_rare_gates)}/{total_rare_gates}")
 
-            # Scout Bees Phase
+            # Phase 3: Scout Bees (Abandon stuck solutions)
             for bee in bee_positions:
                 if bee['trials'] > max_trials:
                     new_position = np.array(['0'] * len(self.inputList))
@@ -426,6 +442,9 @@ class Parser:
         return child1, child2
 
     def fitness_function(self, position, cluster0, cluster1, cluster2):
+        """
+        Evaluates the solution quality based on induced switching activity in rare nodes.
+        """
         inputVector_full = ['0'] * len(self.inputList)
         for idx in cluster0 + cluster1 + cluster2:
             inputVector_full[idx] = position[idx]
@@ -439,6 +458,8 @@ class Parser:
             prevState[node] = None
         inputVector_init = ['0'] * len(self.inputList)
         pairList = [[inputVector_init, inputVector_full]]
+
+        # Calculate SWA for the given pair of vectors
         for pair in pairList:
             changeCount = {node: {"0_to_1": 0, "1_to_0": 0} for node in self.sortedNode}
             prevState = {node: None for node in self.sortedNode}
@@ -460,66 +481,46 @@ class Parser:
                 fitness_values = sum(node_swa_lst)
         return fitness_values
 
-    def HTS_1(self):
-        HTS_list = []
-        for node in self.sortedNode:
-            HTS = abs(self.varMap[node][7][0] - self.varMap[node][7][1]) / max(self.varMap[node][7][0], self.varMap[node][7][1])
-            HTS_list.append(HTS)
-        return HTS_list
-
     def SWA_Alpha(self):
+        """
+        Analyzes the final switching activity distribution against thresholds.
+        """
         SW_list = []
         for node in self.sortedNode:
             node_Alpha = self.varMap[node][10][0] + self.varMap[node][10][1]
             SW_list.append(node_Alpha)
             Alpha_list = [x / self.NoItr for x in SW_list]
-        # alph = sum(1 for i in Alpha_list if i <= self.threshold)
         alph = sum(1 for i in Alpha_list if self.threshold1 < i <= self.threshold2)
-        print("alph: ", alph, "\n", "threshold: ", self.threshold1)
+        print("Alpha: ", alph)
+        print("Threshold1: ", self.threshold1)
+        print("Threshold2: ", self.threshold2)
         return Alpha_list
-
-    def perturb_vector(self, vector, index):
-        perturbed_vector = vector.copy()
-        perturbed_vector[index] = '1' if vector[index] == '0' else '0'
-        return perturbed_vector
-
-    def perturb_vectors(self, vectors):
-        all_perturbed_vectors = []
-        for vector in vectors:
-            perturbed_vectors = []
-            for i in range(len(vector)):
-                perturbed_vector = self.perturb_vector(vector, i)
-                perturbed_vectors.append(perturbed_vector)
-            all_perturbed_vectors.append(perturbed_vectors)
-        return all_perturbed_vectors
 
     def getValue(self, node):
         return self.varMap[node][3]
 
 
-# Main execution
-ob = Parser(seed=42)
-ob.readFile('sequential_datasets/s5378.bench')
+# Main execution block
+if __name__ == "__main__":
+    ob = Parser(seed=42)
+    ob.readFile('sequential_datasets/s5378.bench')
 
-# Generate clusters using clustering.py
-in_n, out_n, nodes, edges = parser('sequential_datasets/s5378.bench')
-G = grapher(in_n, out_n, nodes, edges)
+    # Parse file for graph structure and perform clustering
+    in_n, out_n, nodes, edges = parser('sequential_datasets/s5378.bench')
+    G = grapher(in_n, out_n, nodes, edges)
 
-# Get the list of rare nodes from the parser object
-rare_net_data = ob.rare_net()
+    rare_net_data = ob.rare_net()
 
-# Extract just the node names (since rare_net returns [[name, value], ...])
-rare_nodes = [item[0] for item in rare_net_data]
+    rare_nodes = [item[0] for item in rare_net_data]
 
-# Pass rare_nodes as the 3rd argument
-clustered_inputs = cluster_find_inputs(G, in_n, rare_nodes, num_clusters=3)
+    # Cluster inputs based on their influence on rare nodes
+    clustered_inputs = cluster_find_inputs(G, in_n, rare_nodes, num_clusters=3)
 
-# Map clusters to lists
-Cluster0 = clustered_inputs.get(0, [])
-Cluster1 = clustered_inputs.get(1, [])
-Cluster2 = clustered_inputs.get(2, [])
+    Cluster0 = clustered_inputs.get(0, [])
+    Cluster1 = clustered_inputs.get(1, [])
+    Cluster2 = clustered_inputs.get(2, [])
 
-ob.printSystem()
-test_vectors = ob.ABC_GA(Cluster0, Cluster1, Cluster2)
-print("time: ", (datetime.now() - start).total_seconds())
-ob.SWA_Alpha()
+    ob.printSystem()
+    test_vectors = ob.ABC_GA(Cluster0, Cluster1, Cluster2)
+    print("Execution time: ", (datetime.now() - start).total_seconds())
+    ob.SWA_Alpha()
