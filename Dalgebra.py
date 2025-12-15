@@ -1,5 +1,5 @@
 # D-Algebra
-# This file contains function for Boolean Operation
+# This file contains functions for boolean operations
 # NOT , BUF
 # AND , OR
 # NAND , NOR
