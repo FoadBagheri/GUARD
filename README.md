@@ -1,7 +1,7 @@
 # GUARD: An ABC-GA Hybrid Approach Utilizing Machine Learning and Dimensionality Reduction for Hardware Trojan Detection
 
 This repository contains the official implementation of the paper:
-**"GUARD: An ABC-GA Hybrid Approach Utilizing MAchine LeaRning and Dimensionality Reduction for Hardware Trojan Detection"**.
+**"GUARD: An ABC-GA Hybrid Approach Utilizing Machine Learning and Dimensionality Reduction for Hardware Trojan Detection"**.
 
 ## Abstract
 The design and fabrication of integrated circuits (ICs) increasingly rely on outsourcing, involving multiple third-party entities. This multi-tiered supply chain introduces vulnerabilities, enabling adversarial actors to implant Hardware Trojans (HTs) at various stages of development. Such malicious modifications can lead to a wide range of security threats, including information leakage (e.g., MOLES Trojan) and denial-of-service (rarely triggered bit flip).
