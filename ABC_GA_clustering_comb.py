@@ -35,10 +35,11 @@ class Parser:
 
         # Simulation and optimization parameters
         self.size = 0
-        self.NoItr = 1000  # Number of iterations for Monte Carlo simulation
+        self.NoItr = 1000
         self.threshold1 = 0.1
         self.threshold2 = 0.2
-        self.coverage_ratio = 0.8  # Target coverage percentage for rare gates
+
+        self.coverage_ratio = 1
 
     def readFile(self, fileName):
         """
@@ -111,9 +112,9 @@ class Parser:
         # Post-parsing processing
         self.__cirLevelization()
         self.__sortByLevel()
-        self.__inputRand()  # Initial random simulation
-        self.switchingActivity()  # Calculate initial SWA
-        self.rare_net()  # Identify rare nodes
+        self.__inputRand()
+        self.switchingActivity()
+        self.rare_net()
         return
 
     # --- Circuit Levelization Methods ---
@@ -158,6 +159,7 @@ class Parser:
                         allAssigned = True
         return
 
+
     def printSystem(self):
         """
         Displays the circuit specification table.
@@ -185,6 +187,7 @@ class Parser:
                 node, level, type, value, gate, input, SWA, f='_')
             print(printLine)
         return
+
 
     def __clearValue(self):
         # Reset node values before simulation
@@ -286,19 +289,28 @@ class Parser:
             if self.varMap[node][4] in gate_out_lst:
                 # Calculate average activity
                 rare_node = (self.varMap[node][10][0] + self.varMap[node][10][1]) / self.NoItr
-                if self.threshold1 < rare_node < self.threshold2:
+                if rare_node <= self.threshold1:
                     rare_list.append([node, rare_node])
         return rare_list
 
-    def ABC_GA(self, cluster1, cluster2, cluster3):
+    def ABC_GA(self, cluster0, cluster1, cluster2):
         """
-        Hybrid Artificial Bee Colony (ABC) and Genetic Algorithm (GA) optimization
-        to generate test vectors that activate rare gates.
+        Runs Hybrid ABC-GA optimization.
+        Uses ABC for global search/population refinement, then GA to target specific rare gates.
+
+        Args:
+            cluster0, cluster1, cluster2 (list): Input indices for each cluster.
+        Returns:
+            list: Generated test vectors activating rare gates.
         """
-        num_bees = 20
-        mutation_rate = 0.15
-        crossover_rate = 0.8
-        max_trials = 5
+        # Algorithm Hyperparameters
+        num_employed_bees = 50
+        num_onlooker_bees = 50
+        max_iterations = 20
+        initial_MR = 0.2
+        final_MR = 0.1  # Decays over time
+
+        # Trackers
         rare_gates = self.rare_net()
         total_rare_gates = len(rare_gates)
         activated_rare_gates = set()
@@ -306,7 +318,7 @@ class Parser:
         total_test_vectors_generated = 0
 
         def get_activated_rare_gates(position):
-            # Helper to check which rare gates are triggered by a vector
+            # Check which rare gates this vector triggers
             self.circuitSimulation(position)
             activated = set()
             for rare_gate in rare_gates:
@@ -315,41 +327,53 @@ class Parser:
                     activated.add(gate_name)
             return activated
 
-        # Initialize bee positions based on clustered inputs
+        # --- Population Initialization ---
+        # Focus search on "effective inputs" (clusters) rather than full random
         bee_positions = []
-        combined_clusters = [(idx, val) for idx, val in enumerate(cluster1 + cluster2 + cluster3)]
-        sorted_effective_inputs = sorted(combined_clusters, key=lambda x: x[1], reverse=True)
+        combined_clusters = cluster0 + cluster1 + cluster2
+        sorted_effective_inputs = sorted([(idx, 0) for idx in combined_clusters], key=lambda x: x[1], reverse=True)
+        effective_indices = dict(sorted_effective_inputs).keys()
 
-        for _ in range(num_bees):
+        for _ in range(num_employed_bees):
             position = np.array(['0'] * len(self.inputList))
+            # Randomize only effective inputs first
             for idx, _ in sorted_effective_inputs:
                 position[idx] = str(randint(0, 1))
+            # Fill rest with random noise
             for idx in range(len(position)):
-                if idx not in dict(sorted_effective_inputs).keys():
+                if idx not in effective_indices:
                     position[idx] = str(randint(0, 1))
 
-            fitness = self.fitness_function(position, cluster1, cluster2, cluster3)
+            fitness = self.fitness_function(position, cluster0, cluster1, cluster2)
             bee_positions.append({'position': position, 'fitness': fitness, 'trials': 0})
+            total_test_vectors_generated += 1
 
         global_best_position = max(bee_positions, key=lambda x: x['fitness'])['position']
         global_best_fitness = max(bee_positions, key=lambda x: x['fitness'])['fitness']
 
-        # Main Optimization Loop
-        while len(activated_rare_gates) < self.coverage_ratio * total_rare_gates:
-            total_test_vectors_generated += 1
-            print(f"\nTest vector generation attempt: {total_test_vectors_generated}")
+        print("\n--- Starting ABC Phase (Refine Population) ---")
+
+        for iteration in range(1, max_iterations + 1):
+            # Decay MR
+            current_mr = initial_MR - ((initial_MR - final_MR) * (iteration / max_iterations))
 
             # Phase 1: Employed Bees (Local Search)
-            for i, bee in enumerate(bee_positions):
-                neighbor_idx = randint(0, num_bees - 1)
+            for i in range(num_employed_bees):
+                bee = bee_positions[i]
+
+                # Pick random partner (cannot be self)
+                neighbor_idx = randint(0, num_employed_bees - 1)
                 while neighbor_idx == i:
-                    neighbor_idx = randint(0, num_bees - 1)
+                    neighbor_idx = randint(0, num_employed_bees - 1)
                 neighbor = bee_positions[neighbor_idx]
 
+                # Create candidate via crossover + mutation
                 new_position = self.crossover(bee['position'], neighbor['position'])[0]
-                new_position = self.mutate(new_position, mutation_rate, dict(sorted_effective_inputs).keys())
-                new_fitness = self.fitness_function(new_position, cluster1, cluster2, cluster3)
+                new_position = self.mutate(new_position, current_mr, effective_indices)
+                new_fitness = self.fitness_function(new_position, cluster0, cluster1, cluster2)
+                total_test_vectors_generated += 1
 
+                # Greedy selection
                 if new_fitness > bee['fitness']:
                     bee['position'] = new_position
                     bee['fitness'] = new_fitness
@@ -357,53 +381,106 @@ class Parser:
                 else:
                     bee['trials'] += 1
 
-            # Phase 2: Onlooker Bees (Genetic Operations)
-            for _ in range(num_bees):
-                parent1 = max(bee_positions, key=lambda x: x['fitness'])['position']
-                parent2 = bee_positions[randint(0, num_bees - 1)]['position']
-                if np.random.rand() < crossover_rate:
-                    child1, child2 = self.crossover(parent1, parent2)
-                    child1 = self.mutate(child1, mutation_rate, dict(sorted_effective_inputs).keys())
-                    child2 = self.mutate(child2, mutation_rate, dict(sorted_effective_inputs).keys())
+            # Selection Probabilities (Roulette Wheel)
+            total_fitness = sum(b['fitness'] for b in bee_positions[:num_employed_bees])
+            if total_fitness == 0:
+                probs = [1 / num_employed_bees] * num_employed_bees
+            else:
+                probs = [b['fitness'] / total_fitness for b in bee_positions[:num_employed_bees]]
 
-                    activated_by_child1 = get_activated_rare_gates(child1)
-                    activated_by_child2 = get_activated_rare_gates(child2)
+            # Phase 2: Onlooker Bees (Exploitation)
+            for _ in range(num_onlooker_bees):
+                # Select parent based on fitness probability
+                selected_idx = np.random.choice(range(num_employed_bees), p=probs)
+                parent_bee = bee_positions[selected_idx]
 
-                    print(
-                        f"Test vector {total_test_vectors_generated} (ABC-GA) activated rare gates: {activated_by_child1}")
+                neighbor_idx = randint(0, num_employed_bees - 1)
+                neighbor_bee = bee_positions[neighbor_idx]
 
-                    # Store vectors that activate new rare gates
-                    new_rare_gates_child1 = activated_by_child1 - activated_rare_gates
-                    if new_rare_gates_child1:
-                        print(f"New rare gates activated by child1: {new_rare_gates_child1}")
-                        activated_rare_gates.update(new_rare_gates_child1)
-                        test_vectors.append(child1)
+                new_position = self.crossover(parent_bee['position'], neighbor_bee['position'])[0]
+                new_position = self.mutate(new_position, current_mr, effective_indices)
+                new_fitness = self.fitness_function(new_position, cluster0, cluster1, cluster2)
+                total_test_vectors_generated += 1
 
-                    new_rare_gates_child2 = activated_by_child2 - activated_rare_gates
-                    if new_rare_gates_child2:
-                        print(f"New rare gates activated by child2: {new_rare_gates_child2}")
-                        activated_rare_gates.update(new_rare_gates_child2)
-                        test_vectors.append(child2)
+                if new_fitness > parent_bee['fitness']:
+                    parent_bee['position'] = new_position
+                    parent_bee['fitness'] = new_fitness
+                    parent_bee['trials'] = 0
+                else:
+                    parent_bee['trials'] += 1
 
-                    print(f"Total rare gates activated so far: {len(activated_rare_gates)}/{total_rare_gates}")
+            # Phase 3: Scout Bees (Reset stuck solutions)
+            max_trials_limit = 5
+            for i in range(num_employed_bees):
+                if bee_positions[i]['trials'] > max_trials_limit:
+                    # Re-initialize with random values
+                    new_pos = np.array(['0'] * len(self.inputList))
+                    for idx in effective_indices:
+                        new_pos[idx] = str(randint(0, 1))
+                    for idx in range(len(new_pos)):
+                        if idx not in effective_indices:
+                            new_pos[idx] = str(randint(0, 1))
 
-            # Phase 3: Scout Bees (Abandon stuck solutions)
-            for bee in bee_positions:
-                if bee['trials'] > max_trials:
-                    new_position = np.array(['0'] * len(self.inputList))
-                    for idx, _ in sorted_effective_inputs:
-                        new_position[idx] = str(randint(0, 1))
-                    for idx in range(len(new_position)):
-                        if idx not in dict(sorted_effective_inputs).keys():
-                            new_position[idx] = str(randint(0, 1))
-                    bee['position'] = new_position
-                    bee['fitness'] = self.fitness_function(new_position, cluster1, cluster2, cluster3)
-                    bee['trials'] = 0
+                    bee_positions[i]['position'] = new_pos
+                    bee_positions[i]['fitness'] = self.fitness_function(new_pos, cluster0, cluster1, cluster2)
+                    bee_positions[i]['trials'] = 0
+                    total_test_vectors_generated += 1
 
-        print(f"\nGlobal best test vector: {global_best_position}")
-        print(f"Global best fitness: {global_best_fitness}")
-        print(f"\nMinimum number of tests needed to activate all rare gates: {len(test_vectors)}")
-        print(f"Total number of test vectors generated: {total_test_vectors_generated}")
+            # Update global best
+            current_best_bee = max(bee_positions, key=lambda x: x['fitness'])
+            if current_best_bee['fitness'] > global_best_fitness:
+                global_best_fitness = current_best_bee['fitness']
+                global_best_position = np.copy(current_best_bee['position'])
+
+            if iteration % 10 == 0:
+                print(
+                    f"ABC Iteration {iteration}/{max_iterations}: Best Fitness = {global_best_fitness}, MR = {current_mr:.4f}")
+
+        print("\n--- Starting GA Phase (Pattern Generation) ---")
+
+        # Seed GA with best result from ABC
+        test_vectors.append(global_best_position)
+        initial_activated = get_activated_rare_gates(global_best_position)
+        activated_rare_gates.update(initial_activated)
+        print(f"Initial ABC Best Solution Activated: {len(activated_rare_gates)} gates")
+
+        ga_mutation_rate = final_MR
+
+        # Loop until target coverage is met
+        while len(activated_rare_gates) < self.coverage_ratio * total_rare_gates:
+
+            # Parent Selection (Elitism fallback)
+            if len(test_vectors) < 2:
+                parent1 = test_vectors[0]
+                parent2 = test_vectors[0]
+            else:
+                indices = np.random.choice(len(test_vectors), 2, replace=False)
+                parent1 = test_vectors[indices[0]]
+                parent2 = test_vectors[indices[1]]
+
+            child1, child2 = self.crossover(parent1, parent2)
+            mutated_child = self.mutate(child1, ga_mutation_rate, effective_indices)
+
+            # Check for new activations
+            activated_by_child = get_activated_rare_gates(mutated_child)
+            new_rare_gates = activated_by_child - activated_rare_gates
+
+            test_vectors.append(mutated_child)
+            total_test_vectors_generated += 1
+
+            if new_rare_gates:
+                activated_rare_gates.update(new_rare_gates)
+                print(
+                    f"GA Generated Vector #{len(test_vectors)} found new gates. Total: {len(activated_rare_gates)}/{total_rare_gates}")
+
+            if len(test_vectors) > 1000:
+                print("Max vector limit reached in GA phase.")
+                break
+
+        print(f"\nOptimization Finished.")
+        print(f"Global best fitness found in ABC: {global_best_fitness}")
+        print(f"Total test vectors generated: {total_test_vectors_generated}")
+        print(f"Final Test Vector List Size: {len(test_vectors)}")
         return test_vectors
 
     def mutate(self, child, mutation_rate, effective_inputs):
@@ -460,6 +537,7 @@ class Parser:
                 fitness_values = sum(node_swa_lst)
         return fitness_values
 
+
     def SWA_Alpha(self):
         """
         Analyzes the final switching activity distribution against thresholds.
@@ -469,10 +547,9 @@ class Parser:
             node_Alpha = ob.varMap[node][10][0] + ob.varMap[node][10][1]
             SW_list.append(node_Alpha)
             Alpha_list = [x / self.NoItr for x in SW_list]
-        alph = sum(1 for i in Alpha_list if self.threshold1 < i <= self.threshold2)
-        print("Alpha: ", alph)
-        print("Threshold1: ", self.threshold1)
-        print("Threshold2: ", self.threshold2)
+        alpha = sum(1 for i in Alpha_list if i <= self.threshold1)
+        print("Alpha: ", alpha)
+        print("Threshold: ", self.threshold1)
         return Alpha_list
 
     def getValue(self, node):
